@@ -1,9 +1,26 @@
 import torch
-import itertools
 import numpy as np
 from supabase import create_client
-from collections import Counter
 import random
+import sys
+import os
+
+# Add the directory containing the RL model to the path
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+# Define a model class that matches the saved model architecture
+class SimpleModel(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.net = torch.nn.Sequential(
+            torch.nn.Linear(30, 128),  # Changed from 64 to 128
+            torch.nn.ReLU(),
+            torch.nn.Linear(128, 64),  # Changed from 32 to 64
+            torch.nn.ReLU(),
+            torch.nn.Linear(64, 9)     # Changed from 1 to 9
+        )
+    def forward(self, x):
+        return self.net(x).squeeze()
 
 # Supabase setup
 SUPABASE_URL = "https://gljggtstugjvekcnncys.supabase.co"
@@ -13,254 +30,196 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 # Columns used in state
 STATE_COLUMNS = ['PIE', 'NETRTG', 'MIN', 'USG%', 'TS%', 'AST%']
 
-# Load critic model
-class CriticModel(torch.nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.net = torch.nn.Sequential(
-            torch.nn.Linear(30, 64),
-            torch.nn.ReLU(),
-            torch.nn.Linear(64, 32),
-            torch.nn.ReLU(),
-            torch.nn.Linear(32, 1)
-        )
-    def forward(self, x):
-        return self.net(x).squeeze()
-
-critic = CriticModel()
-critic.load_state_dict(torch.load("lineup_critic_modelNN.pth"))
-critic.eval()
-
-# Helper to convert a 5-player lineup to input vector
-def encode_lineup(players):
-    vec = []
-    for p in players:
-        vec.extend([float(p.get(stat, 0)) for stat in STATE_COLUMNS])
-    return torch.FloatTensor(vec).unsqueeze(0)
-
-# Load Knicks roster
-res = supabase.table("AdvancedStats24New").select("*").eq("TEAM", "NYK").execute()
-knicks_roster = res.data
-print(f"\nLoaded {len(knicks_roster)} Knicks players.")
-
-# Define the preferred lineup (the one we want to prioritize)
-preferred_lineup_names = ["Karl-Anthony Towns", "Jalen Brunson", "Mitchell Robinson", "Josh Hart", "OG Anunoby"]
-preferred_lineup = []
-
-# Find the player objects for the preferred lineup
-for name in preferred_lineup_names:
-    for player in knicks_roster:
-        if player["PLAYER"] == name:
-            preferred_lineup.append(player)
-            break
-
-# If we couldn't find all players, use the first 5 players from the roster
-if len(preferred_lineup) < 5:
-    print("Warning: Could not find all preferred players. Using first 5 players from roster.")
-    preferred_lineup = knicks_roster[:5]
-
-print("\n🟦 Preferred Knicks Lineup:")
-for p in preferred_lineup:
-    print(f" - {p['PLAYER']}")
-
-# Sort players by PIE (Player Impact Estimate) to identify star and role players
-sorted_roster = sorted(knicks_roster, key=lambda x: float(x.get('PIE', 0)), reverse=True)
-star_players = sorted_roster[:5]  # Top 5 players by PIE
-role_players = sorted_roster[5:]  # Rest are role players
-
-print("\n⭐ Star Players:")
-for p in star_players:
-    print(f" - {p['PLAYER']} (PIE: {p.get('PIE', 'N/A')})")
-
-print("\n👥 Role Players:")
-for p in role_players:
-    print(f" - {p['PLAYER']} (PIE: {p.get('PIE', 'N/A')})")
-
-# Load all matchups
-matchups = supabase.table("matchups").select("lineup_b").execute()
-print(f"Loaded {len(matchups.data)} opponent lineups")
-
-# Initialize counters for tracking distributions
-lineup_distribution = Counter()
-player_frequency = Counter()
-best_lineups = []
-
-# Number of opponent lineups to analyze
-num_opponents = min(100, len(matchups.data))
-print(f"\nAnalyzing Knicks lineups against {num_opponents} different opponents...")
-
-# Function to evaluate a lineup
-def evaluate_lineup(lineup, opponent_tensor):
-    input_tensor = encode_lineup(lineup)
-    with torch.no_grad():
-        own_score = critic(input_tensor).item()
-        opp_score = critic(opponent_tensor).item()
-        return own_score - opp_score
-
-# Function to get a slightly modified version of the preferred lineup
-def get_modified_preferred_lineup(roster, num_changes=1):
-    # Start with the preferred lineup
-    modified_lineup = preferred_lineup.copy()
+def main():
+    print("=== Knicks Lineup Optimizer using RL Model ===")
     
-    # Randomly select players to replace
-    indices_to_replace = random.sample(range(5), num_changes)
-    
-    # Get available players not in the lineup
-    available_players = [p for p in roster if p not in modified_lineup]
-    
-    # Replace selected players with random ones
-    for idx in indices_to_replace:
-        if available_players:
-            new_player = random.choice(available_players)
-            modified_lineup[idx] = new_player
-            available_players.remove(new_player)
-    
-    return modified_lineup
-
-# Function to create a lineup with rest management (including some role players)
-def get_rest_management_lineup(num_stars=2, num_role_players=3):
-    # Select random star players
-    selected_stars = random.sample(star_players, num_stars)
-    
-    # Select random role players
-    selected_role_players = random.sample(role_players, num_role_players)
-    
-    # Combine them into a lineup
-    lineup = selected_stars + selected_role_players
-    
-    # Shuffle the lineup to mix stars and role players
-    random.shuffle(lineup)
-    
-    return lineup
-
-# Loop through different opponent lineups
-for i in range(num_opponents):
-    opponent_names = matchups.data[i]["lineup_b"]
-    
-    # Get stats for opponent lineup
-    opponent_stats = []
-    for name in opponent_names:
-        res = supabase.table("AdvancedStats24New").select("*").eq("PLAYER", name).execute()
-        player = res.data[0] if res.data else {}
-        opponent_stats.append(player)
-    
-    if len(opponent_stats) != 5:
-        print(f"Skipping opponent {i} - incomplete lineup data")
-        continue
+    # Step 1: Load the RL model
+    print("\n1. Loading RL model...")
+    try:
+        # Create a model instance
+        model = SimpleModel()
         
-    opponent_tensor = encode_lineup(opponent_stats)
-    
-    # Evaluate the opponent's strength
-    opponent_strength = evaluate_lineup(opponent_stats, opponent_tensor)
-    
-    # Find best Knicks lineup against this opponent
-    best_lineup = None
-    best_score = -float("inf")
-    
-    # Always try the preferred lineup first
-    preferred_score = evaluate_lineup(preferred_lineup, opponent_tensor)
-    if preferred_score > best_score:
-        best_score = preferred_score
-        best_lineup = preferred_lineup
-    
-    # Determine how much randomness to introduce based on opponent strength
-    # For strong opponents (high net rating), use less randomness
-    if opponent_strength > 5.0:  # Strong opponent
-        # Try only a few variations of the preferred lineup
-        for _ in range(3):
-            modified_lineup = get_modified_preferred_lineup(knicks_roster, num_changes=1)
-            score = evaluate_lineup(modified_lineup, opponent_tensor)
-            if score > best_score:
-                best_score = score
-                best_lineup = modified_lineup
-    else:  # Weaker opponent
-        # Try more variations and some completely random lineups
-        # Try variations of the preferred lineup
-        for _ in range(3):
-            modified_lineup = get_modified_preferred_lineup(knicks_roster, num_changes=random.randint(1, 2))
-            score = evaluate_lineup(modified_lineup, opponent_tensor)
-            if score > best_score:
-                best_score = score
-                best_lineup = modified_lineup
+        # Load the state dict
+        model_path = "/Users/roshangopal/Desktop/RLForFlirting/q_learning_lineup_model_knicks_final.pth"
+        saved_data = torch.load(model_path)
         
-        # Try some completely random lineups
-        for _ in range(2):
+        # Check if it's a state dict or a complete model
+        if isinstance(saved_data, dict):
+            # It's a state dict, check if it contains Q-network
+            if "q_network_state_dict" in saved_data:
+                # Extract the Q-network state dict
+                q_network_state_dict = saved_data["q_network_state_dict"]
+                
+                # Try to load it into our model
+                try:
+                    model.load_state_dict(q_network_state_dict)
+                    print("✅ Loaded Q-network state dict successfully!")
+                except Exception as e:
+                    print(f"❌ Error loading Q-network state dict: {e}")
+                    print("Trying to create a new model with the state dict...")
+                    
+                    # If loading fails, create a new model with the state dict
+                    model = SimpleModel()
+                    model.load_state_dict(q_network_state_dict)
+            else:
+                # Try to load the state dict directly
+                try:
+                    model.load_state_dict(saved_data)
+                    print("✅ Loaded state dict successfully!")
+                except Exception as e:
+                    print(f"❌ Error loading state dict: {e}")
+                    print("Creating a new model with the state dict...")
+                    model = SimpleModel()
+                    model.load_state_dict(saved_data)
+        else:
+            # It's a complete model, use it directly
+            model = saved_data
+            
+        # Set to evaluation mode
+        model.eval()
+        print("✅ RL model loaded successfully!")
+        
+        # Verify the model is callable
+        test_input = torch.randn(1, 30)
+        with torch.no_grad():
+            test_output = model(test_input)
+        print(f"✅ Model test successful! Output shape: {test_output.shape}")
+        
+    except Exception as e:
+        print(f"❌ Error loading RL model: {e}")
+        return
+    
+    # Step 2: Load Knicks roster
+    print("\n2. Loading Knicks roster...")
+    try:
+        res = supabase.table("AdvancedStats24New").select("*").eq("TEAM", "NYK").execute()
+        knicks_roster = res.data
+        print(f"✅ Loaded {len(knicks_roster)} Knicks players.")
+    except Exception as e:
+        print(f"❌ Error loading Knicks roster: {e}")
+        return
+    
+    # Step 3: Load opponent lineups from 2024 only
+    print("\n3. Loading opponent lineups from 2024...")
+    try:
+        matchups = supabase.table("lineup_matchups").select("lineup2").eq("year", "2024").execute()
+        opponent_lineups = matchups.data[:100]  # Take first 100 lineups
+        print(f"✅ Loaded {len(opponent_lineups)} opponent lineups from 2024.")
+    except Exception as e:
+        print(f"❌ Error loading opponent lineups: {e}")
+        return
+    
+    # Step 4: Find counter lineups
+    print("\n4. Finding counter lineups...")
+    counter_lineups = []
+    lineup_distribution = {}
+
+    for i, matchup in enumerate(opponent_lineups):
+        # Split the lineup string into individual player names
+        opponent_names = matchup["lineup2"].split(" - ")
+        
+        # Get stats for opponent lineup
+        opponent_stats = []
+        missing_players = []
+        for name in opponent_names:
+            res = supabase.table("AdvancedStats24New").select("*").eq("PLAYER", name).execute()
+            if res.data:
+                player = res.data[0]
+                opponent_stats.append(player)
+            else:
+                missing_players.append(name)
+                # Add an empty dict as a placeholder
+                opponent_stats.append({})
+        
+        # Check if we have enough players
+        valid_players = [p for p in opponent_stats if p]
+        if len(valid_players) < 5:
+            print(f"Skipping opponent {i} - only found {len(valid_players)} players out of 5")
+            if missing_players:
+                print(f"Missing players: {', '.join(missing_players)}")
+            continue
+        
+        # Convert opponent lineup to state tensor
+        opponent_state = []
+        for p in opponent_stats:
+            opponent_state.extend([float(p.get(stat, 0)) for stat in STATE_COLUMNS])
+        opponent_tensor = torch.FloatTensor(opponent_state).unsqueeze(0)
+        
+        # Find best Knicks lineup against this opponent
+        best_lineup = None
+        best_score = -float("inf")
+        
+        # Try some random lineups
+        for _ in range(20):
             random_lineup = random.sample(knicks_roster, 5)
-            score = evaluate_lineup(random_lineup, opponent_tensor)
+            
+            # Convert lineup to state tensor
+            lineup_state = []
+            for p in random_lineup:
+                lineup_state.extend([float(p.get(stat, 0)) for stat in STATE_COLUMNS])
+            lineup_tensor = torch.FloatTensor(lineup_state).unsqueeze(0)
+            
+            # Get score from the model
+            with torch.no_grad():
+                try:
+                    # The model outputs 9 values, we'll use the first one as the score
+                    score = model(lineup_tensor)[0].item()
+                except Exception as e:
+                    print(f"Error evaluating lineup: {e}")
+                    continue
+            
             if score > best_score:
                 best_score = score
                 best_lineup = random_lineup
         
-        # Try rest management lineups (with some role players)
-        for _ in range(5):
-            # For very weak opponents, use more role players
-            if opponent_strength < 0:
-                num_stars = random.randint(1, 2)  # 1-2 star players
-                num_role_players = 5 - num_stars  # 3-4 role players
+        # Store the counter lineup
+        if best_lineup:
+            print(f"Best Lineup: {best_lineup}")
+            print(f"Opponent Stats: {opponent_stats}")
+            
+            # Create a safe version of the opponent lineup with placeholders for missing players
+            opponent_lineup = []
+            for j, p in enumerate(opponent_stats):
+                if p and "PLAYER" in p:
+                    opponent_lineup.append(p["PLAYER"])
+                else:
+                    opponent_lineup.append(f"Unknown Player {j+1}")
+            
+            counter_lineups.append({
+                "opponent": opponent_lineup,
+                "counter": [p["PLAYER"] for p in best_lineup],
+                "score": best_score
+            })
+            
+            # Track lineup distribution
+            lineup_key = " - ".join([p["PLAYER"] for p in best_lineup])
+            if lineup_key in lineup_distribution:
+                lineup_distribution[lineup_key] += 1
             else:
-                num_stars = random.randint(2, 3)  # 2-3 star players
-                num_role_players = 5 - num_stars  # 2-3 role players
-                
-            rest_lineup = get_rest_management_lineup(num_stars, num_role_players)
-            score = evaluate_lineup(rest_lineup, opponent_tensor)
-            
-            # For rest management lineups, we need a minimum score threshold
-            # to ensure we're not sacrificing too much performance
-            min_acceptable_score = -2.0  # Adjust this threshold as needed
-            
-            if score > best_score and score > min_acceptable_score:
-                best_score = score
-                best_lineup = rest_lineup
-                print(f"Found rest management lineup with score {score:.2f} against opponent {i}")
-    
-    # Track the best lineup for this opponent
-    if best_lineup:
-        lineup_names = tuple(sorted([p["PLAYER"] for p in best_lineup]))
-        lineup_distribution[lineup_names] += 1
-        
-        # Track individual player frequency
-        for player in best_lineup:
-            player_frequency[player["PLAYER"]] += 1
-            
-        # Store best lineup and score
-        best_lineups.append((best_lineup, best_score))
+                lineup_distribution[lineup_key] = 1
         
         # Print progress every 10 opponents
         if (i+1) % 10 == 0:
-            print(f"Processed {i+1}/{num_opponents} opponents")
+            print(f"Processed {i+1}/{len(opponent_lineups)} opponents")
+    
+    # Step 5: Display results
+    print("\n5. Results:")
+    print(f"Found {len(counter_lineups)} counter lineups.")
+    
+    # Sort by score
+    counter_lineups.sort(key=lambda x: x["score"], reverse=True)
+    
+    # Display top 10 counter lineups
+    print("\nTop 10 Counter Lineups:")
+    for i, lineup in enumerate(counter_lineups[:10]):
+        print(f"\n{i+1}. Score: {lineup['score']:.2f}")
+        print("   Opponent: " + ", ".join(lineup["opponent"]))
+        print("   Counter: " + ", ".join(lineup["counter"]))
 
-# Print overall distribution of best Knicks lineups
-print("\n📊 Distribution of Best Knicks Lineups (Top 10 most common):")
-for lineup, count in lineup_distribution.most_common(10):
-    print(f"Count: {count} - Lineup: {', '.join(lineup)}")
+    # Display lineup distribution
+    print("\nLineup Distribution:")
+    for lineup, count in sorted(lineup_distribution.items(), key=lambda item: item[1], reverse=True):
+        print(f"{lineup}: {count} times")
 
-# Print player frequency
-print("\n👤 Player Frequency in Best Lineups:")
-for player, freq in player_frequency.most_common():
-    print(f"{player}: {freq} appearances")
-
-# Print top 5 best lineups overall
-print("\n🏆 Top 5 Best Knicks Lineups (Across All Opponents):")
-best_lineups.sort(key=lambda x: x[1], reverse=True)
-for i, (lineup, score) in enumerate(best_lineups[:5]):
-    print(f"\n{i+1}. Net Rating Difference: {score:.2f}")
-    for p in lineup:
-        print(f"   - {p['PLAYER']}")
-
-# Print rest management lineups (those with 3 or more role players)
-print("\n🔄 Rest Management Lineups (3+ Role Players):")
-rest_lineups = []
-for lineup, score in best_lineups:
-    role_player_count = sum(1 for p in lineup if p in role_players)
-    if role_player_count >= 3:
-        rest_lineups.append((lineup, score, role_player_count))
-
-# Sort by score
-rest_lineups.sort(key=lambda x: x[1], reverse=True)
-
-# Display top 5 rest management lineups
-for i, (lineup, score, role_count) in enumerate(rest_lineups[:5]):
-    print(f"\n{i+1}. Net Rating Difference: {score:.2f} (Role Players: {role_count})")
-    for p in lineup:
-        player_type = "⭐" if p in star_players else "👥"
-        print(f"   {player_type} {p['PLAYER']}")
+if __name__ == "__main__":
+    main()
