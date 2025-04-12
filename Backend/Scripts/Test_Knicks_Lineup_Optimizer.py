@@ -113,7 +113,7 @@ def main():
             # Start with a random lineup
             current_lineup = random.sample(knicks_roster, 5)
             
-            # Create the state vector with only current lineup stats
+            # Create the state vector
             state = []
             for p in current_lineup:
                 state.extend([float(p.get(stat, 0)) for stat in STATE_COLUMNS])
@@ -124,14 +124,14 @@ def main():
             # Get Q-values from the model
             with torch.no_grad():
                 try:
-                    # The model outputs Q-values for each possible action
                     q_values = model(state_tensor)
-                    # Get the best action (player to substitute)
                     best_action = q_values.argmax().item()
                     
-                    # Replace a random player with the selected player
-                    replace_idx = random.randint(0, 4)
-                    current_lineup[replace_idx] = knicks_roster[best_action]
+                    # Get available players (excluding current lineup)
+                    available_players = [p for p in knicks_roster if p not in current_lineup]
+                    if available_players:  # Only replace if there are available players
+                        replace_idx = random.randint(0, 4)
+                        current_lineup[replace_idx] = available_players[best_action % len(available_players)]
                     
                     # Calculate the score for this lineup
                     score = q_values.max().item()
