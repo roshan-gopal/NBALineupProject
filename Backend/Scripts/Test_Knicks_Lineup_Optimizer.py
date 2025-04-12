@@ -113,6 +113,7 @@ def main():
     print("\n4. Finding counter lineups...")
     counter_lineups = []
     lineup_distribution = {}
+    player_frequency = {}  # Track how many times each player appears
 
     for i, matchup in enumerate(opponent_lineups):
         # Split the lineup string into individual player names
@@ -197,6 +198,14 @@ def main():
                 lineup_distribution[lineup_key] += 1
             else:
                 lineup_distribution[lineup_key] = 1
+                
+            # Track player frequency
+            for player in best_lineup:
+                player_name = player["PLAYER"]
+                if player_name in player_frequency:
+                    player_frequency[player_name] += 1
+                else:
+                    player_frequency[player_name] = 1
         
         # Print progress every 10 opponents
         if (i+1) % 10 == 0:
@@ -220,6 +229,11 @@ def main():
     print("\nLineup Distribution:")
     for lineup, count in sorted(lineup_distribution.items(), key=lambda item: item[1], reverse=True):
         print(f"{lineup}: {count} times")
+        
+    # Display player frequency
+    print("\nPlayer Frequency in Optimal Lineups:")
+    for player, count in sorted(player_frequency.items(), key=lambda item: item[1], reverse=True):
+        print(f"{player}: {count} appearances")
 
 if __name__ == "__main__":
     main()
