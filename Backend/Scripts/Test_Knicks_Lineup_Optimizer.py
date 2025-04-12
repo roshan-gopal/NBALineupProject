@@ -5,22 +5,10 @@ import random
 import sys
 import os
 
-# Add the directory containing the RL model to the path
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-
-# Define a model class that matches the saved model architecture
-class SimpleModel(torch.nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.net = torch.nn.Sequential(
-            torch.nn.Linear(30, 128),  # Changed from 64 to 128
-            torch.nn.ReLU(),
-            torch.nn.Linear(128, 64),  # Changed from 32 to 64
-            torch.nn.ReLU(),
-            torch.nn.Linear(64, 9)     # Changed from 1 to 9
-        )
-    def forward(self, x):
-        return self.net(x).squeeze()
+# Add the parent directory to the Python path
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(current_dir)
+sys.path.append(parent_dir)
 
 # Supabase setup
 SUPABASE_URL = "https://gljggtstugjvekcnncys.supabase.co"
@@ -30,63 +18,39 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 # Columns used in state
 STATE_COLUMNS = ['PIE', 'NETRTG', 'MIN', 'USG%', 'TS%', 'AST%']
 
+# Define a simple model class that matches the saved model architecture
+class QNetwork(torch.nn.Module):
+    def __init__(self, state_dim, action_dim):
+        super().__init__()
+        self.net = torch.nn.Sequential(
+            torch.nn.Linear(30, 128),  # Input layer: 30 features (6 stats × 5 players)
+            torch.nn.ReLU(),
+            torch.nn.Linear(128, 64),  # Hidden layer: 128 → 64 neurons
+            torch.nn.ReLU(),
+            torch.nn.Linear(64, 9)     # Output layer: 64 → 9 actions
+        )
+    def forward(self, x):
+        return self.net(x)
+
 def main():
     print("=== Knicks Lineup Optimizer using RL Model ===")
     
-    # Step 1: Load the RL model
-    print("\n1. Loading RL model...")
+    # Step 1: Load the saved model
+    print("\n1. Loading saved model...")
     try:
-        # Create a model instance
-        model = SimpleModel()
-        
-        # Load the state dict
+        state_dim = 30  # 6 stats × 5 players
+        action_dim = 9  # Number of possible actions
+        model = QNetwork(state_dim, action_dim)
         model_path = "/Users/roshangopal/Desktop/RLForFlirting/q_learning_lineup_model_knicks_final.pth"
-        saved_data = torch.load(model_path)
         
-        # Check if it's a state dict or a complete model
-        if isinstance(saved_data, dict):
-            # It's a state dict, check if it contains Q-network
-            if "q_network_state_dict" in saved_data:
-                # Extract the Q-network state dict
-                q_network_state_dict = saved_data["q_network_state_dict"]
-                
-                # Try to load it into our model
-                try:
-                    model.load_state_dict(q_network_state_dict)
-                    print("✅ Loaded Q-network state dict successfully!")
-                except Exception as e:
-                    print(f"❌ Error loading Q-network state dict: {e}")
-                    print("Trying to create a new model with the state dict...")
-                    
-                    # If loading fails, create a new model with the state dict
-                    model = SimpleModel()
-                    model.load_state_dict(q_network_state_dict)
-            else:
-                # Try to load the state dict directly
-                try:
-                    model.load_state_dict(saved_data)
-                    print("✅ Loaded state dict successfully!")
-                except Exception as e:
-                    print(f"❌ Error loading state dict: {e}")
-                    print("Creating a new model with the state dict...")
-                    model = SimpleModel()
-                    model.load_state_dict(saved_data)
-        else:
-            # It's a complete model, use it directly
-            model = saved_data
-            
-        # Set to evaluation mode
+        # Load the checkpoint
+        checkpoint = torch.load(model_path)
+        # Load the Q-network state dict
+        model.load_state_dict(checkpoint['q_network_state_dict'])
         model.eval()
-        print("✅ RL model loaded successfully!")
-        
-        # Verify the model is callable
-        test_input = torch.randn(1, 30)
-        with torch.no_grad():
-            test_output = model(test_input)
-        print(f"✅ Model test successful! Output shape: {test_output.shape}")
-        
+        print("✅ Model loaded successfully!")
     except Exception as e:
-        print(f"❌ Error loading RL model: {e}")
+        print(f"❌ Error loading model: {e}")
         return
     
     # Step 2: Load Knicks roster
@@ -140,60 +104,55 @@ def main():
                 print(f"Missing players: {', '.join(missing_players)}")
             continue
         
-        # Convert opponent lineup to state tensor
-        opponent_state = []
-        for p in opponent_stats:
-            opponent_state.extend([float(p.get(stat, 0)) for stat in STATE_COLUMNS])
-        opponent_tensor = torch.FloatTensor(opponent_state).unsqueeze(0)
-        
         # Find best Knicks lineup against this opponent
         best_lineup = None
         best_score = -float("inf")
         
         # Try some random lineups
         for _ in range(20):
-            random_lineup = random.sample(knicks_roster, 5)
+            # Start with a random lineup
+            current_lineup = random.sample(knicks_roster, 5)
             
-            # Convert lineup to state tensor
-            lineup_state = []
-            for p in random_lineup:
-                lineup_state.extend([float(p.get(stat, 0)) for stat in STATE_COLUMNS])
-            lineup_tensor = torch.FloatTensor(lineup_state).unsqueeze(0)
+            # Create the state vector with only current lineup stats
+            state = []
+            for p in current_lineup:
+                state.extend([float(p.get(stat, 0)) for stat in STATE_COLUMNS])
             
-            # Get score from the model
+            # Convert to tensor
+            state_tensor = torch.FloatTensor(state).unsqueeze(0)
+            
+            # Get Q-values from the model
             with torch.no_grad():
                 try:
-                    # The model outputs 9 values, we'll use the first one as the score
-                    score = model(lineup_tensor)[0].item()
+                    # The model outputs Q-values for each possible action
+                    q_values = model(state_tensor)
+                    # Get the best action (player to substitute)
+                    best_action = q_values.argmax().item()
+                    
+                    # Replace a random player with the selected player
+                    replace_idx = random.randint(0, 4)
+                    current_lineup[replace_idx] = knicks_roster[best_action]
+                    
+                    # Calculate the score for this lineup
+                    score = q_values.max().item()
                 except Exception as e:
                     print(f"Error evaluating lineup: {e}")
                     continue
             
             if score > best_score:
                 best_score = score
-                best_lineup = random_lineup
+                best_lineup = current_lineup
         
-        # Store the counter lineup
         if best_lineup:
-            print(f"Best Lineup: {best_lineup}")
-            print(f"Opponent Stats: {opponent_stats}")
-            
-            # Create a safe version of the opponent lineup with placeholders for missing players
-            opponent_lineup = []
-            for j, p in enumerate(opponent_stats):
-                if p and "PLAYER" in p:
-                    opponent_lineup.append(p["PLAYER"])
-                else:
-                    opponent_lineup.append(f"Unknown Player {j+1}")
-            
+            # Store the counter lineup
             counter_lineups.append({
-                "opponent": opponent_lineup,
+                "opponent": opponent_names,
                 "counter": [p["PLAYER"] for p in best_lineup],
                 "score": best_score
             })
             
-            # Track lineup distribution
-            lineup_key = " - ".join([p["PLAYER"] for p in best_lineup])
+            # Track lineup distribution (sort players to handle different orderings)
+            lineup_key = " - ".join(sorted([p["PLAYER"] for p in best_lineup]))
             if lineup_key in lineup_distribution:
                 lineup_distribution[lineup_key] += 1
             else:
