@@ -4,11 +4,13 @@ from supabase import create_client
 import random
 import sys
 import os
+from collections import Counter
+from typing import List
 
-# Add the parent directory to the Python path
+# Add the project root to the Python path
 current_dir = os.path.dirname(os.path.abspath(__file__))
-parent_dir = os.path.dirname(current_dir)
-sys.path.append(parent_dir)
+project_root = os.path.dirname(os.path.dirname(current_dir))
+sys.path.append(project_root)
 
 # Supabase setup
 SUPABASE_URL = "https://gljggtstugjvekcnncys.supabase.co"
@@ -18,16 +20,16 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 # Columns used in state
 STATE_COLUMNS = ['PIE', 'NETRTG', 'MIN', 'USG%', 'TS%', 'AST%']
 
-# Define a simple model class that matches the saved model architecture
+# Define the Q-Network with correct output dimension
 class QNetwork(torch.nn.Module):
-    def __init__(self, state_dim, action_dim):
+    def __init__(self, state_dim=30, output_dim=10):  # Set output_dim to 10 for compatibility
         super().__init__()
         self.net = torch.nn.Sequential(
-            torch.nn.Linear(30, 128),  # Input layer: 30 features (6 stats × 5 players)
+            torch.nn.Linear(30, 128),
             torch.nn.ReLU(),
-            torch.nn.Linear(128, 64),  # Hidden layer: 128 → 64 neurons
+            torch.nn.Linear(128, 64),
             torch.nn.ReLU(),
-            torch.nn.Linear(64, 9)     # Output layer: 64 → 9 actions
+            torch.nn.Linear(64, output_dim)
         )
     def forward(self, x):
         return self.net(x)
@@ -39,9 +41,9 @@ def main():
     print("\n1. Loading saved model...")
     try:
         state_dim = 30  # 6 stats × 5 players
-        action_dim = 9  # Number of possible actions
-        model = QNetwork(state_dim, action_dim)
-        model_path = "/Users/roshangopal/Desktop/RLForFlirting/q_learning_lineup_model_knicks_final.pth"
+        output_dim = 10  # Match the saved model's output dimension
+        model = QNetwork(state_dim=state_dim, output_dim=output_dim)
+        model_path = "/Users/roshangopal/Desktop/NBALineupOptimizer/Backend/Models/q_learning_lineup_model_lakers_episode_50.pth"
         
         # Load the checkpoint
         checkpoint = torch.load(model_path)
@@ -56,9 +58,9 @@ def main():
     # Step 2: Load Knicks roster
     print("\n2. Loading Knicks roster...")
     try:
-        res = supabase.table("AdvancedStats24New").select("*").eq("TEAM", "NYK").execute()
+        res = supabase.table("AdvancedStats24New").select("*").eq("TEAM", "LAL").execute()
         knicks_roster = res.data
-        print(f"✅ Loaded {len(knicks_roster)} Knicks players.")
+        print(f"✅ Loaded {len(knicks_roster)} LAL players.")
     except Exception as e:
         print(f"❌ Error loading Knicks roster: {e}")
         return

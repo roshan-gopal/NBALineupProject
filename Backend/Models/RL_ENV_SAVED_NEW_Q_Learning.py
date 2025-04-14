@@ -344,4 +344,86 @@ class LineupEnv(gym.Env):
         # Calculate reward
         reward = current_rating - opponent_rating
         
-        return reward 
+        return reward
+
+# Main Training Loop
+# Train exclusively on the New York Knicks
+team_name = "NYK"  # New York Knicks
+print(f"Training exclusively on the {team_name}")
+
+# Create the Q-learning agent with a fixed state dimension
+state_dim = len(STATE_COLUMNS) * 5  # 5 players
+action_dim = 30  # Maximum expected roster size
+
+# Initialize the agent with fixed dimensions
+agent = QLearningAgent(state_dim=state_dim, action_dim=action_dim)
+
+# Training parameters
+num_episodes = 300  # Reduced from 1000 to 300
+max_steps_per_episode = 50
+save_interval = 50  # Save model every 50 episodes
+opponent_change_frequency = 50  # Change opponent every 50 steps (entire episode)
+
+# Create environment for the Knicks
+env = LineupEnv(team_name=team_name)
+
+# Update action space to match the Knicks roster size
+roster_size = len(env.roster)
+print(f"Knicks roster size: {roster_size} players")
+
+# Create an agent with the correct action space for the Knicks
+agent = QLearningAgent(state_dim=state_dim, action_dim=roster_size)
+
+# Training loop
+for episode in range(num_episodes):
+    print(f"Epoch {episode+1}/{num_episodes} - Team: {team_name} - Epsilon: {agent.epsilon:.4f}")
+    
+    # Select an opponent lineup and stay with it for the entire episode
+    opponent_lineup = build_target_lineup()
+    print(f"Selected opponent lineup: {opponent_lineup}")
+    
+    # Reset environment with the same opponent lineup
+    state = env.reset()
+    env.opponent_lineup = opponent_lineup  # Ensure we use the same opponent
+    
+    episode_reward = 0
+    
+    for step in range(max_steps_per_episode):
+        # Get action from agent
+        action = agent.select_action(state)
+        
+        # Take action in environment
+        next_state, reward, done, _ = env.step(action)
+        
+        # Update agent after each substitution (single-step update)
+        loss = agent.update(state, action, reward, next_state, done)
+        
+        # Update state and reward
+        state = next_state
+        episode_reward += reward
+        
+        if done:
+            break
+    
+    # Decay epsilon after each episode
+    agent.update_epsilon()
+    
+    # Check for early stopping
+    if agent.check_early_stopping(episode_reward):
+        print(f"Early stopping triggered at episode {episode+1}")
+        break
+    
+    # Print episode results
+    print(f"Epoch {episode+1}/{num_episodes}, Team: {team_name}, Reward: {episode_reward:.2f}, Best: {agent.best_reward:.2f}")
+    
+    # Save model periodically
+    if (episode + 1) % save_interval == 0:
+        # Save the model
+        model_save_path = f"q_learning_lineup_model_knicks_episode_{episode+1}.pth"
+        agent.save(model_save_path)
+        print(f"Model saved to {model_save_path}")
+
+# Save the final model
+final_model_path = "q_learning_lineup_model_knicks_final.pth"
+agent.save(final_model_path)
+print(f"Final model saved to {final_model_path}") 

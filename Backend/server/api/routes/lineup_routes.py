@@ -5,6 +5,7 @@ import random
 from supabase import create_client
 import os
 import sys
+from collections import Counter
 
 # Add the project root to the Python path
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -23,14 +24,14 @@ STATE_COLUMNS = ['PIE', 'NETRTG', 'MIN', 'USG%', 'TS%', 'AST%']
 
 # Define the Q-Network
 class QNetwork(torch.nn.Module):
-    def __init__(self, state_dim, action_dim):
+    def __init__(self, state_dim, action_dim, output_dim=None):
         super().__init__()
         self.net = torch.nn.Sequential(
             torch.nn.Linear(30, 128),  # Input layer: 30 features (6 stats × 5 players)
             torch.nn.ReLU(),
             torch.nn.Linear(128, 64),  # Hidden layer: 128 → 64 neurons
             torch.nn.ReLU(),
-            torch.nn.Linear(64, 9)     # Output layer: 64 → 9 actions
+            torch.nn.Linear(64, output_dim or action_dim)  # Output layer: 64 → output_dim actions
         )
     def forward(self, x):
         return self.net(x)
@@ -39,11 +40,36 @@ class LineupOptimizer:
     def __init__(self):
         # Initialize the model
         state_dim = 30  # 6 stats × 5 players
-        action_dim = 9  # Number of possible actions
+        action_dim = 9  # Default action dim for Knicks model
         self.model = QNetwork(state_dim, action_dim)
         
-        # Load the trained model
-        model_path = os.path.join(project_root, "Models", "q_learning_lineup_model_knicks_final.pth")
+        # Base path for models
+        self.model_base_path = os.path.join(project_root, "Models")
+        
+        # Load the default model (Knicks)
+        model_path = os.path.join(self.model_base_path, "q_learning_lineup_model_knicks_final.pth")
+        checkpoint = torch.load(model_path)
+        self.model.load_state_dict(checkpoint['q_network_state_dict'])
+        self.model.eval()
+
+    def load_model_for_team(self, team: str):
+        """Load the appropriate model based on team."""
+        if team == "GSW":
+            # Warriors model has 10 output dimensions
+            print("Loading Warriors model")
+            self.model = QNetwork(30, 9, output_dim=10)
+            model_name = "q_learning_lineup_model_warriors_final.pth"
+        elif team == "LAL":
+            # Lakers model has 12 output dimensions
+            self.model = QNetwork(30, 9, output_dim=12)
+            model_name = "q_learning_lineup_model_lakers_final.pth"
+        else:
+            # Knicks model has 9 output dimensions
+            print("Loading Knicks model")
+            self.model = QNetwork(30, 9)
+            model_name = "q_learning_lineup_model_knicks_final.pth"
+        
+        model_path = os.path.join(self.model_base_path, model_name)
         checkpoint = torch.load(model_path)
         self.model.load_state_dict(checkpoint['q_network_state_dict'])
         self.model.eval()
@@ -59,6 +85,9 @@ class LineupOptimizer:
     def optimize_lineup(self, opponent_players: List[str], team: str) -> Dict[str, Any]:
         """Optimize lineup using RL model."""
         try:
+            # Load the appropriate model
+            self.load_model_for_team(team)
+
             # Get team roster
             team_roster = self.get_team_players(team)
             if not team_roster:
@@ -81,51 +110,86 @@ class LineupOptimizer:
             if len(valid_players) < 5:
                 raise HTTPException(status_code=400, detail=f"Not enough valid opponent players. Missing: {', '.join(missing_players)}")
 
-            # Find best lineup
-            best_lineup = None
-            best_score = -float("inf")
-            
-            # Try some random lineups
-            for _ in range(20):
-                # Start with a random lineup
+            # Track all lineups and their scores
+            lineup_counter = Counter()
+            all_scores = {}
+
+            # Run optimization with exploration
+            num_attempts = 20
+            iterations_per_attempt = 150
+            exploration_rate = 0.25 if team == "GSW" else 0.1  # Higher exploration for Warriors
+
+            for _ in range(num_attempts):
                 current_lineup = random.sample(team_roster, 5)
                 
-                # Create the state vector
-                state = []
-                for p in current_lineup:
-                    state.extend([float(p.get(stat, 0)) for stat in STATE_COLUMNS])
-                
-                # Convert to tensor
-                state_tensor = torch.FloatTensor(state).unsqueeze(0)
-                
-                # Get Q-values from the model
-                with torch.no_grad():
-                    try:
+                for _ in range(iterations_per_attempt):
+                    state = []
+                    for p in current_lineup:
+                        state.extend([float(p.get(stat, 0)) for stat in STATE_COLUMNS])
+                    state_tensor = torch.FloatTensor(state).unsqueeze(0)
+                    
+                    with torch.no_grad():
                         q_values = self.model(state_tensor)
-                        best_action = q_values.argmax().item()
                         
-                        # Get available players (excluding current lineup)
-                        available_players = [p for p in team_roster if p not in current_lineup]
-                        if available_players:  # Only replace if there are available players
-                            replace_idx = random.randint(0, 4)
-                            current_lineup[replace_idx] = available_players[best_action % len(available_players)]
+                        # Use epsilon-greedy selection
+                        if random.random() < exploration_rate:
+                            best_action = random.randint(0, q_values.size(1)-1)
+                            current_score = q_values[0, best_action].item()
+                        else:
+                            best_action = q_values.argmax().item()
+                            current_score = q_values.max().item()
+                    
+                    available_players = [p for p in team_roster if p not in current_lineup]
+                    
+                    if available_players:
+                        # Special handling for Warriors model
+                        if team == "GSW" and len(q_values[0]) == 10:
+                            player_index = int((best_action / 10) * len(available_players))
+                            suggested_player = available_players[min(player_index, len(available_players)-1)]
+                        else:
+                            suggested_player = available_players[best_action % len(available_players)]
                         
-                        # Calculate the score for this lineup
-                        score = q_values.max().item()
-                    except Exception as e:
-                        print(f"Error evaluating lineup: {e}")
-                        continue
+                        # Try replacing each current player
+                        best_new_score = current_score
+                        best_new_lineup = current_lineup
+                        
+                        for i in range(5):
+                            temp_lineup = current_lineup.copy()
+                            temp_lineup[i] = suggested_player
+                            
+                            temp_state = []
+                            for p in temp_lineup:
+                                temp_state.extend([float(p.get(stat, 0)) for stat in STATE_COLUMNS])
+                            temp_tensor = torch.FloatTensor(temp_state).unsqueeze(0)
+                            
+                            with torch.no_grad():
+                                temp_q_values = self.model(temp_tensor)
+                                temp_score = temp_q_values.max().item()
+                                
+                                if temp_score > best_new_score:
+                                    best_new_score = temp_score
+                                    best_new_lineup = temp_lineup.copy()
+                        
+                        if best_new_score > current_score:
+                            current_lineup = best_new_lineup
                 
-                if score > best_score:
-                    best_score = score
-                    best_lineup = current_lineup
+                # Track lineup and score
+                lineup_tuple = tuple(sorted(player["PLAYER"] for player in current_lineup))
+                lineup_counter[lineup_tuple] += 1
+                if lineup_tuple not in all_scores or current_score > all_scores[lineup_tuple]:
+                    all_scores[lineup_tuple] = current_score
 
-            if best_lineup is None:
-                raise HTTPException(status_code=500, detail="Failed to find a valid lineup")
+            # Get top 3 lineups
+            top_lineups = []
+            for lineup_tuple, count in lineup_counter.most_common(3):
+                top_lineups.append({
+                    "lineup": list(lineup_tuple),
+                    "score": all_scores[lineup_tuple],
+                    "frequency": count
+                })
 
             return {
-                "lineup": [player["PLAYER"] for player in best_lineup],
-                "score": best_score,
+                "lineups": top_lineups,
                 "opponent": opponent_players
             }
             
@@ -144,8 +208,8 @@ class LineupOptimizer:
             return {
                 "test_result": "success",
                 "sample_opponent": sample_opponent,
-                "optimized_lineup": result["lineup"],
-                "score": result["score"]
+                "optimized_lineup": result["lineups"][0]["lineup"],
+                "score": result["lineups"][0]["score"]
             }
         except Exception as e:
             return {
